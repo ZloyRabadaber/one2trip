@@ -15,7 +15,7 @@ const timeout time.Duration = time.Millisecond * 500
 //генерация случайной строки
 var letterRunes = []rune("1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-func RandString(n int) string {
+func randString(n int) string {
 	rand.Seed(time.Now().UnixNano())
 	b := make([]rune, n)
 	for i := range b {
@@ -73,7 +73,7 @@ func main() {
 }
 
 func isLeader(db *redis.Client) bool {
-	id := RandString(16)
+	id := randString(16)
 	msg.Println("id: ", id)
 
 	//регистрируемся как кандидат в мастеры
@@ -95,9 +95,8 @@ func isLeader(db *redis.Client) bool {
 			if leader != nil && leader.Val() == id {
 				tx.Del("leader")
 				return nil
-			} else {
-				return errors.New("slave")
 			}
+			return errors.New("slave")
 		})
 		return err
 	}, "leader") == nil
@@ -107,12 +106,12 @@ func transmitter(db *redis.Client) error {
 	msg.Println("I am leader")
 
 	for {
-		mess := RandString(rand.Intn(80))
-		_, err := db.Publish("messages", mess).Result()
+		mess := randString(rand.Intn(80))
+		_, err := db.RPush("messages", mess).Result()
 		if err != nil {
 			panic(err)
 		}
-		msg.Println("send:", mess)
+		msg.Println("-> ", mess)
 		time.Sleep(timeout)
 	}
 }
@@ -120,50 +119,13 @@ func transmitter(db *redis.Client) error {
 func receiver(db *redis.Client) error {
 	msg.Println("I am slave")
 
-	pubsub := db.Subscribe("messages")
-	defer pubsub.Close()
-
 	for {
-		msgi, err := pubsub.ReceiveTimeout(time.Second)
+		messages, err := db.BLPop(timeout*2, "messages").Result()
 		if err != nil {
 			//нет сообщений. переходим к выбору мастера
 			return errors.New("timeout")
 		}
 
-		switch mess := msgi.(type) {
-		case *redis.Subscription:
-			msg.Println("subscribed to", mess.Channel)
-		case *redis.Message:
-			//пришло сообщение
-			if db.Watch(func(tx *redis.Tx) error {
-				_, err := tx.Pipelined(func(pipe redis.Pipeliner) error {
-					//пробуем удалить сообщение из базы
-					count := pipe.LRem("messages", 1, mess.Payload)
-					if count.Val() > 0 {
-						//сообщение уже было зарегистрированно. отменяем транзакцию
-						return errors.New("exist")
-					} else {
-						//имитируем ошибочный пакет (вероятность 5%)
-						if rand.Intn(100) < 5 {
-							//вносим сообщение в базу ошибок
-							db.RPush("errors", mess.Payload)
-							msg.Print("----- ERROR MESSAGE (imitation) -----")
-							return errors.New("error message")
-						} else {
-							//вносим сообщение в базу
-							pipe.RPush("messages", mess.Payload)
-							return nil
-						}
-					}
-				})
-				return err
-			}, "messages") == nil {
-				//если транзакция прошла, отображаем сообщение
-				msg.Println(mess.Payload)
-			}
-		default:
-			msg.Panic("unreached")
-		}
-
+		msg.Println("<- ", messages[1])
 	}
 }
